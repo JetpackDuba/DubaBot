@@ -185,6 +185,7 @@ async fn help(ctx: &Context, msg: &Message) -> CommandResult {
     **next** - Plays next track.
     **queue** - Shows the queue of tracks.
     **goto [INDEX]** - Plays immediately the specific track of the queue (discards all previous tracks).
+    **shuffle** - Reorders the queue randomly.
     "#;
 
     check_msg(msg.channel_id.say(&ctx.http, message).await);
@@ -267,6 +268,7 @@ async fn play_song(ctx: &Context, msg: &Message, args: Args, insert_last: bool) 
 }
 
 async fn play_next_if_queue_empty(ctx: &Context, guild_id: &GuildId, msg: &Message) {
+    info!("play_next_if_queue_empty start");
     let is_not_playing: bool;
     let queue_is_empty: bool;
 
@@ -284,6 +286,8 @@ async fn play_next_if_queue_empty(ctx: &Context, guild_id: &GuildId, msg: &Messa
             info!("Next song failed")
         }
     }
+
+    info!("play_next_if_queue_empty end");
 }
 
 #[command]
