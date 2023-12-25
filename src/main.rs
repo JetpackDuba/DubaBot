@@ -409,6 +409,8 @@ async fn shuffle(ctx: &Context, msg: &Message) -> CommandResult {
     let songs = &mut server.queue;
     songs.make_contiguous().shuffle(&mut thread_rng());
 
+    msg.react(&ctx.http, Unicode("👍".to_string())).await?;
+    
     Ok(())
 }
 
