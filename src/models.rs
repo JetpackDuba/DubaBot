@@ -14,6 +14,6 @@ pub struct ServerData {
     pub queue: VecDeque<Song>,
 }
 
-pub struct DubaServers {
+pub struct DubaBot {
     pub servers: HashMap<u64, ServerData>,
 }
