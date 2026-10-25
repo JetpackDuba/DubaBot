@@ -1,11 +1,11 @@
 use dotenvy::dotenv;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
+use rand::rng;
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use serde_json::ser::State::Empty;
-use serenity::all::standard::Configuration;
 use serenity::all::FullEvent;
+use serenity::all::standard::Configuration;
 use serenity::client::Context;
 use serenity::framework::standard::CommandError;
 use serenity::model::channel::ReactionType::Unicode;
@@ -14,28 +14,27 @@ use serenity::model::id::{ChannelId, UserId};
 use serenity::model::prelude::{GuildId, VoiceState};
 use serenity::prelude::{TypeMap, TypeMapKey};
 use serenity::{
-    async_trait,
+    Result as SerenityResult, async_trait,
     client::{Client, EventHandler},
     framework::{
-        standard::{
-            macros::{command, group},
-            Args, CommandResult,
-        },
         StandardFramework,
+        standard::{
+            Args, CommandResult,
+            macros::{command, group},
+        },
     },
     model::{channel::Message, gateway::Ready},
     prelude::GatewayIntents,
-    Result as SerenityResult,
 };
+use songbird::TrackEvent::End;
 use songbird::input::{Compose, YoutubeDl};
 use songbird::tracks::TrackHandle;
-use songbird::TrackEvent::End;
 use songbird::{Event, EventContext, EventHandler as VoiceEventHandler, SerenityInit};
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
 use std::env;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::info;
 
@@ -65,8 +64,8 @@ async fn main() {
     let framework = poise::Framework::builder()
         .setup(move |_ctx, _ready, _framework| Box::pin(async move { Ok(server) }))
         .options(poise::FrameworkOptions {
-            event_handler: |ctx, event, framework, data| {
-                Box::pin(event_handler(ctx, event, framework, data))
+            event_handler: |ctx, event| {
+                Box::pin(event_handler(ctx.serenity_context, event, ctx.user_data))
             },
             ..Default::default()
         })
@@ -97,7 +96,6 @@ async fn main() {
 async fn event_handler(
     ctx: &Context,
     event: &FullEvent,
-    _framework: poise::FrameworkContext<'_, Arc<RwLock<DubaBot>>, Error>,
     data: &Arc<RwLock<DubaBot>>,
 ) -> Result<(), Error> {
     match event {
@@ -116,30 +114,61 @@ async fn event_handler(
         }
         FullEvent::VoiceStateUpdate { old, new } => {
             if new.channel_id.is_none() {
-                if let Some(guild_id) = new.guild_id {
-                    if ctx.cache.current_user().id == new.user_id.get() {
-                        info!("Bot ID matches disconnected user");
-
-                        let mut duba_bot = data.write().await;
-
-                        if let Err(error) = clear_queue(&mut duba_bot, &guild_id).await {
-                            info!("{:#?}", error)
-                        }
-
-                        if let Err(error) =
-                            stop_current_track(ctx, &mut duba_bot, &guild_id, None).await
-                        {
-                            info!("{:#?}", error)
-                        }
-                    } else {
-                        info!("Bot ID does not match disconnected user");
-                    }
-                }
+                user_disconnected(ctx, data, old, new).await?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+async fn user_disconnected(
+    ctx: &Context,
+    data: &Arc<RwLock<DubaBot>>,
+    old: &Option<VoiceState>,
+    new: &VoiceState,
+) -> Result<(), Error> {
+    if let Some(guild_id) = new.guild_id {
+        if ctx.cache.current_user().id == new.user_id.get() {
+            info!("Bot ID matches disconnected user");
+            stop_and_clear_queue(ctx, data, &guild_id).await;
+        } else {
+            info!("Bot ID does not match disconnected user");
+            if let Some(channel_id) = old.as_ref().and_then(|v| v.channel_id)
+                && is_channel_empty(ctx, guild_id, channel_id).await?
+            {
+                stop_and_clear_queue(ctx, data, &guild_id).await;
+                let _ = leave(ctx, &guild_id, &channel_id, false).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn stop_and_clear_queue(ctx: &Context, data: &Arc<RwLock<DubaBot>>, guild_id: &GuildId) {
+    let mut duba_bot = data.write().await;
+
+    if let Err(error) = clear_queue(&mut duba_bot, &guild_id).await {
+        info!("{:#?}", error)
+    }
+
+    if let Err(error) = stop_current_track(ctx, &mut duba_bot, &guild_id, None).await {
+        info!("{:#?}", error)
+    }
+}
+
+async fn is_channel_empty(
+    ctx: &Context,
+    guild_id: GuildId,
+    channel_id: ChannelId,
+) -> Result<bool, Error> {
+    let members = ctx
+        .http
+        .as_ref()
+        .get_guild_members(guild_id, None,None)
+        .await?;
+
+    Ok(members.is_empty())
 }
 
 async fn message_input(
@@ -211,11 +240,7 @@ async fn play(
     let user_id = ctx.cache.current_user().id;
 
     message
-        .delete_reaction(
-            &ctx.http,
-            Some(user_id),
-            loading_emoji.clone(),
-        )
+        .delete_reaction(&ctx.http, Some(user_id), loading_emoji.clone())
         .await
         .expect("Could not delete emoji");
 
@@ -248,19 +273,13 @@ async fn play(
             .await;
 
             message
-                .react(
-                    &ctx.http,
-                    Unicode("👍".to_string()),
-                )
+                .react(&ctx.http, Unicode("👍".to_string()))
                 .await
                 .expect("Could not delete emoji");
         }
         Err(_) => {
             message
-                .react(
-                    &ctx.http,
-                    Unicode("💀".to_string()),
-                )
+                .react(&ctx.http, Unicode("💀".to_string()))
                 .await
                 .expect("Could not delete emoji");
         }
@@ -297,7 +316,7 @@ async fn stop(
 
     clear_queue(&mut duba_bot, &guild_id).await?;
     stop_current_track(ctx, &mut duba_bot, &guild_id, Some(&new_message.channel_id)).await?;
-    leave(ctx, new_message).await?;
+    leave(ctx, guild_id, &new_message.channel_id, true).await?;
     Ok(())
 }
 
@@ -501,7 +520,7 @@ async fn shuffle(
         .expect("No server");
 
     let songs = &mut server.queue;
-    songs.make_contiguous().shuffle(&mut thread_rng());
+    songs.make_contiguous().shuffle(&mut rng());
 
     msg.react(&ctx.http, Unicode("👍".to_string())).await?;
 
@@ -577,32 +596,33 @@ async fn stop_current_track(
     Ok(())
 }
 
-async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
-    leave_current_channel(ctx, msg).await
+async fn leave(ctx: &Context, guild_id: &GuildId, channel_id: &ChannelId, notify: bool) -> CommandResult {
+    leave_current_channel(ctx, guild_id, channel_id, notify).await
 }
 
-async fn leave_current_channel(ctx: &Context, msg: &Message) -> CommandResult {
-    let guild_id = get_guild_id(ctx, msg)?;
-
+async fn leave_current_channel(ctx: &Context, guild_id: &GuildId, channel_id: &ChannelId, notify: bool) -> CommandResult {
     let manager = songbird::get(ctx)
         .await
         .expect("Songbird Voice client placed in at initialisation.")
         .clone();
 
-    let has_handler = manager.get(guild_id).is_some();
+    let has_handler = manager.get(guild_id.clone()).is_some();
 
     if has_handler {
-        if let Err(e) = manager.remove(guild_id).await {
-            check_msg(
-                msg.channel_id
-                    .say(&ctx.http, format!("Failed: {e:?}"))
-                    .await,
-            );
+        if let Err(e) = manager.remove(guild_id.clone()).await {
+            if notify {
+                check_msg(
+                    channel_id
+                        .say(&ctx.http, format!("Failed: {e:?}"))
+                        .await,
+                );
+            }
         }
 
-        check_msg(msg.channel_id.say(&ctx.http, "Left voice channel").await);
-    } else {
-        check_msg(msg.reply(ctx, "Not in a voice channel").await);
+        if notify {
+            check_msg(channel_id.say(&ctx.http, "Left voice channel").await);
+        }
+
     }
 
     Ok(())
@@ -740,7 +760,7 @@ async fn get_track_handle<'a>(data: &'a DubaBot, guild_id: &GuildId) -> Option<&
     let guilds = &data.servers;
     let guild = guilds.get(&guild_id.get())?;
 
-    return guild.track_handle.as_ref();
+    guild.track_handle.as_ref()
 }
 
 async fn get_track_handle2<'a>(data: &'a DubaBot, guild_id: &GuildId) -> Option<&'a TrackHandle> {
@@ -807,37 +827,6 @@ async fn push_song_to_guild(
 
     Ok(())
 }
-
-// async fn push_songs_list_to_server(
-//     ctx: &Context,
-//     guild_id: &GuildId,
-//     songs: Vec<Song>,
-// ) -> Result<(), CommandError> {
-//     let data = &mut ctx.data.write().await;
-//     let duba_guild = data
-//         .get_mut::<ServersManager>()
-//         .ok_or(CommandError::from("Guild not found"))?;
-//     let servers = &mut duba_guild.servers;
-//     let server = servers.get_mut(&guild_id.get());
-//
-//     match server {
-//         Some(data) => {
-//             let queue = &mut data.queue;
-//             let mut new_songs = VecDeque::from(songs);
-//             queue.append(&mut new_songs);
-//         }
-//         None => {
-//             let new_guild_data = ServerData {
-//                 track_handle: None,
-//                 queue: VecDeque::from(songs),
-//             };
-//
-//             servers.insert(guild_id.get(), new_guild_data);
-//         }
-//     };
-//
-//     Ok(())
-// }
 
 /// Checks that a message successfully sent; if not, then logs why to stdout.
 fn check_msg(result: SerenityResult<Message>) {
