@@ -25,6 +25,7 @@ poise = { version = "0.7.1" }
 
 
 # Symphonia is needed as a dependency so songbird can work with all types of codecs
+symphonia-core = { version = "0.6.1", features = ["default"] }
 symphonia = { version = "0.6.1", features = ["all"] }
 tokio = { version = "1.21.2", features = ["macros", "rt-multi-thread", "signal"] }
 dotenvy = "0.15"
